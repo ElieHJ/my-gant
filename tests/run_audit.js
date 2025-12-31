@@ -30,6 +30,10 @@ try {
     console.log(`T2 Early Start: ${t2.earlyStart.toISOString()}`);
     console.log(`T2 Early Finish: ${t2.earlyFinish.toISOString()}`);
 
+    if (m1) {
+        console.log(`M1 Early Start: ${m1.earlyStart.toISOString()}`);
+    }
+
     if (t2.earlyStart.getTime() === t1.earlyFinish.getTime()) {
         console.warn("WARNING: Tasks start exactly when predecessor finishes. This is standard FS link.");
     }
