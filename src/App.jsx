@@ -547,7 +547,9 @@ export default function GanttApp() {
                         {/* Left Header (Sticky Left) */}
                         <div className="w-[350px] sticky left-0 z-40 bg-gray-50 border-r flex items-center px-4 text-xs font-bold text-gray-500 uppercase tracking-wider">
                             <div className="flex-1">Tâche / Ressource</div>
-                            <div className="w-16 text-right">Durée</div>
+                            <div className="w-16 text-right hidden md:block">Début</div>
+                            <div className="w-16 text-right hidden md:block">Fin</div>
+                            <div className="w-12 text-right">Durée</div>
                             <div className="w-12 text-right">%</div>
                         </div>
                         {/* Right Header */}
@@ -574,7 +576,9 @@ export default function GanttApp() {
                                             <span className={`truncate ${row.type === 'phase' ? 'font-bold text-gray-800' : 'text-gray-600'}`}>{row.name || 'Sans nom'}</span>
                                             {row.isCritical && ui.showCriticalPath && <AlertCircle size={12} className="text-red-500 ml-1" />}
                                         </div>
-                                        <div className="w-16 text-right text-gray-500 text-xs">{row.type === 'milestone' ? '-' : `${row.duration}j`}</div>
+                                        <div className="w-16 text-right text-gray-500 text-xs hidden md:block">{row.earlyStart ? normalizeDate(row.earlyStart).toLocaleDateString('fr-FR', { day: '2-digit', month: '2-digit' }) : '-'}</div>
+                                        <div className="w-16 text-right text-gray-500 text-xs hidden md:block">{row.earlyFinish ? addDays(row.earlyFinish, -1).toLocaleDateString('fr-FR', { day: '2-digit', month: '2-digit' }) : '-'}</div>
+                                        <div className="w-12 text-right text-gray-500 text-xs">{row.type === 'milestone' ? '-' : `${row.duration}j`}</div>
                                         <div className="w-12 text-right text-xs font-mono bg-gray-100 rounded px-1 ml-2">{row.progress}%</div>
                                     </div>
                                 );
