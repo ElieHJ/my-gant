@@ -1,9 +1,11 @@
+import { db } from './firebaseConfig';
+import { ref, onValue, set, remove, update } from "firebase/database";
 import React, { useState, useMemo, useEffect, useRef, useCallback } from 'react';
 import {
     ChevronDown, ChevronRight, Plus, Users, Save, Trash2, AlertCircle,
     Flag, Activity, X, Calendar as CalendarIcon, Check, Download, Upload,
     Move, Anchor, BarChart2, Undo, Redo, Clock, DollarSign, PieChart, TrendingUp,
-    AlertTriangle, ShieldAlert, Grid, UserCheck
+    AlertTriangle, ShieldAlert, Grid, UserCheck, Database
 } from 'lucide-react';
 import { Button } from './components/ui/Button';
 import { Modal } from './components/ui/Modal';
@@ -16,7 +18,7 @@ import { normalizeDate, formatDateInput, getWeekNumber, addDays, getDiffDays, MS
 import { formatCurrency } from './utils/formatUtils';
 
 
-// --- DONNÉES DE DÉMONSTRATION ---
+// --- DONNÉES DE DÉMONSTRATION (Pour le bouton Init) ---
 
 const INITIAL_RESOURCES = [
     { id: 'r1', name: 'Alice Dev', dailyRate: 450, weekends: [0, 6], holidays: [{ start: '2025-01-10', end: '2025-01-15' }] },
@@ -51,7 +53,7 @@ const INITIAL_CONFIG = {
 
 export default function GanttApp() {
     const [projectState, setProjectState] = useState({
-        tasks: INITIAL_TASKS,
+        tasks: [], // Initialise vide, sera rempli par Firebase
         resources: INITIAL_RESOURCES
     });
 
@@ -67,27 +69,59 @@ export default function GanttApp() {
         showBaselineConfirm: false,
         showHistogram: false,
         showDashboard: false,
-        showWorkloadModal: false, // NOUVEAU
+        showWorkloadModal: false,
     });
 
     const [dragState, setDragState] = useState({ isDragging: false, type: null, taskId: null, startX: 0, initialTaskStart: null, initialDuration: 0, currentX: 0 });
     const fileInputRef = useRef(null);
 
-    // Init depuis LocalStorage
+    // --- INITIALISATION & FIREBASE ---
     useEffect(() => {
-        const savedTasks = localStorage.getItem('gantt_tasks');
+        // 1. Charger les ressources depuis LocalStorage (ou garder initiales)
         const savedRes = localStorage.getItem('gantt_resources');
         const savedConfig = localStorage.getItem('gantt_config');
-        if (savedTasks && savedRes) {
+
+        if (savedRes) {
             try {
-                const t = JSON.parse(savedTasks);
                 const r = JSON.parse(savedRes);
-                if (t && r) setProjectState({ tasks: t, resources: r });
+                if (r) setProjectState(prev => ({ ...prev, resources: r }));
             } catch (e) { console.error(e); }
         }
         if (savedConfig) {
             try { setConfig(JSON.parse(savedConfig)); } catch { /* ignore */ }
         }
+
+        // 2. Écouter Firebase pour les tâches
+        const tasksRef = ref(db, 'projets/taches');
+        const unsubscribe = onValue(tasksRef, (snapshot) => {
+            const data = snapshot.val();
+            let loadedTasks = [];
+            if (data) {
+                loadedTasks = Object.keys(data).map(key => {
+                    const task = data[key];
+                    return {
+                        ...task,
+                        id: key,
+                        // PROTECTION 1 : Liste vide pour dépendances
+                        dependencies: task.dependencies || [],
+                        // PROTECTION 2 : Firebase supprime les null, on les remet
+                        parentId: task.parentId || null,
+                        // PROTECTION 3 : Forcer les dates en format Date
+                        manualStart: task.manualStart ? new Date(task.manualStart) : null,
+                        earlyStart: task.earlyStart ? new Date(task.earlyStart) : null,
+                        earlyFinish: task.earlyFinish ? new Date(task.earlyFinish) : null,
+                        lateStart: task.lateStart ? new Date(task.lateStart) : null,
+                        lateFinish: task.lateFinish ? new Date(task.lateFinish) : null,
+                        baselineStart: task.baselineStart ? new Date(task.baselineStart) : null,
+                        baselineFinish: task.baselineFinish ? new Date(task.baselineFinish) : null
+                    };
+                });
+            }
+            console.log("Données converties :", loadedTasks); // On garde le log pour vérifier
+            setProjectState(prev => ({ ...prev, tasks: loadedTasks }));
+        });
+
+        return () => unsubscribe();
     }, []);
 
     // Sauvegarde & Historique Wrapper
@@ -105,7 +139,7 @@ export default function GanttApp() {
                 setHistoryIndex(idx => idx + 1);
             }
 
-            localStorage.setItem('gantt_tasks', JSON.stringify(next.tasks));
+            // On sauvegarde seulement les ressources en local, les tâches sont gérées par Firebase
             localStorage.setItem('gantt_resources', JSON.stringify(next.resources));
 
             return next;
@@ -143,7 +177,12 @@ export default function GanttApp() {
 
     const processedTasks = useMemo(() => {
         if (!projectState.tasks || !projectState.resources) return [];
-        return Scheduler.calculate(projectState.tasks, projectState.resources, config.startDate);
+        // Protection supplémentaire pour le scheduler
+        const safeTasks = projectState.tasks.map(t => ({
+            ...t,
+            dependencies: t.dependencies || []
+        }));
+        return Scheduler.calculate(safeTasks, projectState.resources, config.startDate);
     }, [projectState.tasks, projectState.resources, config.startDate]);
 
     // --- CALCUL DES STATS PROJET (KPI) ---
@@ -199,14 +238,13 @@ export default function GanttApp() {
         if (config.viewMode === 'Month') setConfig(c => ({ ...c, zoom: 5 }));
     }, [config.viewMode]);
 
-    // CALCULS DÉRIVÉS & CONSTANTES (Déplacés ici pour portée globale)
+    // CALCULS DÉRIVÉS & CONSTANTES
     const projectStart = normalizeDate(config.startDate);
     let maxDate = projectStart;
     processedTasks.forEach(t => { if (t.earlyFinish && t.earlyFinish > maxDate) maxDate = t.earlyFinish; });
 
     const totalDays = Math.max(getDiffDays(projectStart, maxDate) + 60, 60);
 
-    // IMPORTANT : Déclaration de canvasWidth ici pour être accessible partout
     const canvasWidth = totalDays * config.zoom;
 
     const resourceLoad = useMemo(() => {
@@ -226,16 +264,19 @@ export default function GanttApp() {
         return loadMap;
     }, [processedTasks, projectState.resources, totalDays, projectStart]);
 
-    // --- HANDLERS ---
+    // --- HANDLERS FIREBASE (ACTIONS) ---
+
     const confirmBaseline = () => {
-        updateProjectState(prev => ({
-            ...prev,
-            tasks: prev.tasks.map(t => {
-                const computed = processedTasks.find(p => p.id === t.id);
-                if (!computed || !computed.earlyStart || !computed.earlyFinish) return t;
-                return { ...t, baselineStart: computed.earlyStart.toISOString(), baselineFinish: computed.earlyFinish.toISOString() };
-            })
-        }));
+        // Mise à jour de toutes les tâches dans Firebase avec les nouvelles baselines
+        const updates = {};
+        projectState.tasks.forEach(t => {
+            const computed = processedTasks.find(p => p.id === t.id);
+            if (computed && computed.earlyStart && computed.earlyFinish) {
+                updates[`projets/taches/${t.id}/baselineStart`] = computed.earlyStart.toISOString();
+                updates[`projets/taches/${t.id}/baselineFinish`] = computed.earlyFinish.toISOString();
+            }
+        });
+        update(ref(db), updates);
         setUi(prev => ({ ...prev, showBaselineConfirm: false }));
     };
 
@@ -255,24 +296,18 @@ export default function GanttApp() {
         const { type, taskId, startX, currentX, initialTaskStart, initialDuration } = dragState;
         const deltaX = currentX - startX;
         const deltaDays = Math.round(deltaX / config.zoom);
+
         if (deltaDays !== 0) {
-            updateProjectState(prev => ({
-                ...prev,
-                tasks: prev.tasks.map(t => {
-                    if (t.id !== taskId) return t;
-                    if (type === 'move') {
-                        const newDate = addDays(initialTaskStart, deltaDays);
-                        return { ...t, manualStart: formatDateInput(newDate) };
-                    } else if (type === 'resize') {
-                        const newDuration = Math.max(1, initialDuration + deltaDays);
-                        return { ...t, duration: newDuration };
-                    }
-                    return t;
-                })
-            }));
+            if (type === 'move') {
+                const newDate = addDays(initialTaskStart, deltaDays);
+                update(ref(db, `projets/taches/${taskId}`), { manualStart: formatDateInput(newDate) });
+            } else if (type === 'resize') {
+                const newDuration = Math.max(1, initialDuration + deltaDays);
+                update(ref(db, `projets/taches/${taskId}`), { duration: newDuration });
+            }
         }
         setDragState({ isDragging: false, type: null, taskId: null, startX: 0, initialTaskStart: null, initialDuration: 0, currentX: 0 });
-    }, [dragState, config.zoom, updateProjectState]);
+    }, [dragState, config.zoom]);
 
     useEffect(() => {
         if (dragState.isDragging) { window.addEventListener('mousemove', handleGlobalMouseMove); window.addEventListener('mouseup', handleGlobalMouseUp); }
@@ -280,7 +315,8 @@ export default function GanttApp() {
     }, [dragState.isDragging, handleGlobalMouseMove, handleGlobalMouseUp]);
 
     const handleUpdateTask = (updatedTask) => {
-        updateProjectState(prev => ({ ...prev, tasks: prev.tasks.map(t => t.id === updatedTask.id ? updatedTask : t) }));
+        // Envoi de la tâche modifiée à Firebase
+        update(ref(db, `projets/taches/${updatedTask.id}`), updatedTask);
         setUi(prev => ({ ...prev, showTaskModal: false, selectedTaskId: null }));
     };
 
@@ -302,11 +338,37 @@ export default function GanttApp() {
         updateProjectState(prev => ({ ...prev, resources: prev.resources.filter(r => r.id !== id) }));
     };
 
-    const handleAddTask = (type) => updateProjectState(prev => ({ ...prev, tasks: [...prev.tasks, { id: 't' + Date.now(), name: type === 'phase' ? 'Nouvelle Phase' : 'Nouvelle Tâche', type, risk: 'low', duration: type === 'milestone' ? 0 : 1, progress: 0, dependencies: [], parentId: null, assignee: prev.resources[0]?.id, manualStart: null, isExpanded: true }] }));
+    const handleAddTask = (type) => {
+        const newId = 't' + Date.now();
+        const newTask = {
+            id: newId,
+            name: type === 'phase' ? 'Nouvelle Phase' : 'Nouvelle Tâche',
+            type,
+            risk: 'low',
+            duration: type === 'milestone' ? 0 : 1,
+            progress: 0,
+            dependencies: [],
+            parentId: null,
+            assignee: projectState.resources[0]?.id || '',
+            manualStart: null,
+            isExpanded: true
+        };
+        // Écriture directe dans Firebase
+        set(ref(db, `projets/taches/${newId}`), newTask);
+    };
 
     const handleDeleteTask = (id) => {
-        updateProjectState(prev => ({ ...prev, tasks: prev.tasks.filter(t => t.id !== id && t.parentId !== id) }));
+        // Suppression directe dans Firebase
+        remove(ref(db, `projets/taches/${id}`));
         setUi(prev => ({ ...prev, selectedTaskId: null }));
+    };
+
+    const initDemo = () => {
+        const updates = {};
+        INITIAL_TASKS.forEach(t => {
+            updates[`projets/taches/${t.id}`] = t;
+        });
+        update(ref(db), updates);
     };
 
     const handleExportJSON = () => {
@@ -320,7 +382,17 @@ export default function GanttApp() {
         const file = event.target.files[0]; if (!file) return;
         const reader = new FileReader();
         reader.onload = (e) => {
-            try { const json = JSON.parse(e.target.result); if (json.tasks && Array.isArray(json.tasks)) { if (window.confirm("Écraser le projet actuel ?")) { updateProjectState({ tasks: json.tasks, resources: json.resources || INITIAL_RESOURCES }); if (json.config) setConfig(prev => ({ ...prev, ...json.config })); } } } catch { alert("Erreur import JSON"); } event.target.value = '';
+            try {
+                const json = JSON.parse(e.target.result);
+                if (json.tasks && Array.isArray(json.tasks)) {
+                    if (window.confirm("Écraser le projet actuel ?")) {
+                        // Note : Pour l'import JSON, il faudrait idéalement vider Firebase d'abord, 
+                        // puis pousser toutes les tâches du JSON. 
+                        // Pour l'instant, on met à jour le state local et on pourrait implémenter un push vers Firebase ici.
+                        alert("L'import JSON est désactivé en mode connecté Firebase pour éviter les conflits.");
+                    }
+                }
+            } catch { alert("Erreur import JSON"); } event.target.value = '';
         }; reader.readAsText(file);
     };
 
@@ -375,16 +447,7 @@ export default function GanttApp() {
     };
 
 
-
-
-
-    // --- NOUVEAU COMPOSANT : WORKLOAD HEATMAP ---
-
-
-    // --- DASHBOARD KPI EXISTANT ---
-
-
-    // --- LAYOUT UNIFIÉ (CSS SCROLL) ---
+    // --- LAYOUT UNIFIÉ ---
     return (
         <div className="flex flex-col h-screen bg-gray-50 font-sans text-gray-800 overflow-hidden">
             <header className="bg-white border-b shadow-sm z-20 flex flex-col flex-shrink-0">
@@ -405,6 +468,12 @@ export default function GanttApp() {
                         <Button variant="ghost" icon={Download} onClick={handleExportJSON} title="Sauvegarder">Export</Button>
                         <Button variant="ghost" icon={Upload} onClick={() => fileInputRef.current.click()} title="Restaurer">Import</Button>
                         <div className="h-6 w-px bg-gray-300 mx-1"></div>
+
+                        {/* BOUTON INITIALISATION DEMO - Visible uniquement si 0 tâche */}
+                        {projectState.tasks.length === 0 && (
+                            <Button variant="primary" icon={Database} onClick={initDemo} title="Créer des données de démo">Init Démo</Button>
+                        )}
+
 
                         {/* BOUTONS WORKLOAD & KPI */}
                         <Button variant="ghost" icon={UserCheck} onClick={() => setUi(u => ({ ...u, showWorkloadModal: true }))} className={ui.showWorkloadModal ? "bg-green-50 text-green-700" : ""} title="Matrice de charge détaillée">Plan de Charge</Button>
